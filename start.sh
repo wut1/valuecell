@@ -101,8 +101,20 @@ start_backend() {
     warn "Backend directory not found; skipping backend start"
     return 0
   fi
-  info "Starting backend in debug mode (AGENT_DEBUG_MODE=true)..."
-  cd "$PY_DIR" && AGENT_DEBUG_MODE=true uv run python -m valuecell.server.main
+  
+  local background_mode="${1:-false}"
+  
+  if [[ "$background_mode" == "true" ]]; then
+    info "Starting backend in background mode with debug (AGENT_DEBUG_MODE=true)..."
+    cd "$PY_DIR" && nohup AGENT_DEBUG_MODE=true uv run python -m valuecell.server.main > backend.log 2>&1 &
+    BACKEND_PID=$!
+    echo "$BACKEND_PID" > .backend_pid
+    success "Backend started in background with PID: $BACKEND_PID"
+    info "Logs are being written to: $PY_DIR/backend.log"
+  else
+    info "Starting backend in debug mode (AGENT_DEBUG_MODE=true)..."
+    cd "$PY_DIR" && AGENT_DEBUG_MODE=true uv run python -m valuecell.server.main
+  fi
 }
 
 start_frontend() {
@@ -117,6 +129,23 @@ start_frontend() {
   info "Frontend PID: $FRONTEND_PID"
 }
 
+stop_backend() {
+  if [[ -f ".backend_pid" ]]; then
+    local pid=$(cat .backend_pid)
+    if kill -0 "$pid" 2>/dev/null; then
+      info "Stopping backend process with PID: $pid"
+      kill "$pid" 2>/dev/null || true
+      rm -f .backend_pid
+      success "Backend stopped successfully"
+    else
+      warn "Backend process with PID $pid is not running"
+      rm -f .backend_pid
+    fi
+  else
+    warn "No backend PID file found. Backend may not be running in background."
+  fi
+}
+
 cleanup() {
   echo
   info "Stopping services..."
@@ -126,6 +155,7 @@ cleanup() {
   if [[ -n "$BACKEND_PID" ]] && kill -0 "$BACKEND_PID" 2>/dev/null; then
     kill "$BACKEND_PID" 2>/dev/null || true
   fi
+  stop_backend
   success "Stopped"
 }
 
@@ -148,6 +178,8 @@ Description:
 Options:
   --no-frontend   Start backend only
   --no-backend    Start frontend only
+  --backend-bg    Start backend in background mode
+  --stop-backend  Stop background backend process
   -h, --help      Show help
 EOF
 }
@@ -155,15 +187,25 @@ EOF
 main() {
   local start_frontend_flag=1
   local start_backend_flag=1
+  local backend_bg_flag=0
+  local stop_backend_flag=0
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --no-frontend) start_frontend_flag=0; shift ;;
       --no-backend)  start_backend_flag=0; shift ;;
+      --backend-bg)  backend_bg_flag=1; start_frontend_flag=0; shift ;;
+      --stop-backend) stop_backend_flag=1; shift ;;
       -h|--help)     print_usage; exit 0 ;;
       *) error "Unknown argument: $1"; print_usage; exit 1 ;;
     esac
   done
+
+  # Handle stop backend command
+  if (( stop_backend_flag )); then
+    stop_backend
+    exit 0
+  fi
 
   # Ensure tools
   ensure_tool bun oven-sh/bun/bun
@@ -177,11 +219,15 @@ main() {
   sleep 5  # Give frontend a moment to start
 
   if (( start_backend_flag )); then
-    start_backend
+    start_backend "false"
+  elif (( backend_bg_flag )); then
+    start_backend "true"
   fi
 
-  # Wait for background jobs
-  wait
+  # Wait for background jobs (only if not running backend in background)
+  if (( backend_bg_flag == 0 )); then
+    wait
+  fi
 }
 
 main "$@"
